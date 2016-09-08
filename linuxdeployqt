@@ -107,6 +107,7 @@ force=0
 dry_run=0
 
 # pull this information for the deployment of qt
+toolversion=1.0
 qtversion=$("$qtdir/bin/qmake" -v | grep ' Qt version ' | sed -e 's/.* Qt version \([0-9\.]*\) .*/\1/')
 qtbindir=$("$qtdir/bin/qmake" -query QT_INSTALL_BINS)
 qtlibdir=$("$qtdir/bin/qmake" -query QT_INSTALL_LIBS)
@@ -195,7 +196,15 @@ function parse_args
 				usage
 				;;
 
-			-v|--verbose)
+			-v|--version)
+				if [[ $# -lt 1 ]]; then
+					echo "linuxdeployqt Version: $toolversion"
+					echo "Qt Version: $qtversion"
+					exit 0
+				fi
+				;;
+
+			--verbose)
 				if [[ $# -lt 1 ]]; then
 					failure "no verbosity given for $arg"
 				fi
