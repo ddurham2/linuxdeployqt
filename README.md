@@ -22,3 +22,5 @@ My writing of this project is primarily for my own purposes.  As such, it does n
 support for qml (I don't use the stuff (yet)).  And so if qml needs to be supported, the script may
 need some tweaks.
 
+Support for webkit is also untested.
+
