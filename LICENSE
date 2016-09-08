@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2016 ddurham2
+Copyright (c) 2016 Davy durham
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+=====
+
+
+Additionally, this project was created with the possibility in mind that it
+could be absorbed into the official Qt project, and to that end, the license,
+terms, grants, and copyright of this project may be altered to any extent.

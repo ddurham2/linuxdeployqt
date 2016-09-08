@@ -1,0 +1,925 @@
+#!/bin/bash
+
+# 
+# The MIT License (MIT)
+# 
+# Copyright (c) 2016 Davy Durham
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+#
+# See project's LICENSE file for further terms.
+# 
+#
+
+
+#######################################################################################################################
+#
+# HOW THIS SCRIPT WORKS:
+#
+# After parsing arguments, it iterates over the given application executables.
+# For an executable it runs ldd to determine which qt modules are needed, filtering by libQt5.*
+# It arranges for that library file to be copied from the specified Qt installation into the libdir and also pulls in
+# any plugins required by that module (using the $modulesPlugins array).  Not assuming that a plugin might require 
+# additional modules, ldd is used on the plugin's library as well and the process recurs (but it checks for circular
+# dependencies so as not to get into an infinite recursion).
+#
+# After all the things to copy have been recorded, if it's not a dry run, then we execute those copies and not
+# overwriting existing files unless requested.
+#
+# Additionally, Qt5Core must be massaged to change its qt_prfxpath from the qt installation dir to '.'.
+#
+# Finally, we output json if requested
+#
+#######################################################################################################################
+
+# bail on any error
+set -e
+
+script=$(basename "$0")
+
+function failure # <msg...>
+{
+	echo "$script:" "$@" >&2
+	echo >&2
+	exit 2
+}
+
+# Determine where qt lives...
+#  first base it off the location of this script
+qtdir=$(cd $(dirname "$0")/.. && pwd)
+if [[ ! -x "$qtdir/bin/qmake" ]]; then
+	#  if that didn't work, then base it off of $QTDIR
+	qtdir=$QTDIR
+fi
+if [[ ! -x "$qtdir/bin/qmake" ]]; then
+	failure "cannot locate Qt libs based on where $0 was found.  You may optionally set \$QTDIR before running if required"
+fi
+
+
+# array of exe's to scan
+declare -a exes
+
+# parallel arrays of what should be copied, and where, using relative paths
+declare -a src_types # "module" or "plugin"
+declare -a srcs
+declare -a dests
+declare -a src_is_debug
+declare -a src_copied # after make_it_so is run, this returns a 0 or 1 for each file if it ws really copied
+
+# a collection of the modules being copied (e.g.  "libQt5Core")
+declare -a copied_modules
+
+# what to copy
+debug_symbols=0
+copy_plugins=1
+copy_libs=1
+copy_translations=1
+
+# where to copy to
+dir=""
+libdir=""
+plugindir=""
+translationdir=""
+
+# output
+verbose=1
+json=0
+
+# other flags
+force=0
+dry_run=0
+
+# pull this information for the deployment of qt
+qtversion=$("$qtdir/bin/qmake" -v | grep ' Qt version ' | sed -e 's/.* Qt version \([0-9\.]*\) .*/\1/')
+qtbindir=$("$qtdir/bin/qmake" -query QT_INSTALL_BINS)
+qtlibdir=$("$qtdir/bin/qmake" -query QT_INSTALL_LIBS)
+qtpluginsdir=$("$qtdir/bin/qmake" -query QT_INSTALL_PLUGINS)
+qttranslationsdir=$("$qtdir/bin/qmake" -query QT_INSTALL_TRANSLATIONS)
+
+# some constants for the current naming scheme used by qt
+QtModuleRegEx="libQt[5-9]"
+QtCoreLib="libQt[5-9]Core.so.[5-9]"
+
+
+
+function log # <vebosity level> <msg...>
+{
+	local v=$1
+	shift 1
+
+	if [[ $v -le $verbose ]]; then
+		echo "$@"
+	fi
+}
+
+function usage
+{
+cat <<EOF
+Usage: $script [options] [files]
+Qt Deploy Tool for Qt $qtversion
+
+The simplest way to use $script is to add the bin directory of your Qt
+installation (e.g. <QT_DIR/bin>) to the PATH variable and then run:
+	$script <path-to-app-binary>
+
+Options:
+	-?, -h, --help             Displays this help.
+	-v, --version              Displays verion information.
+	--dir <directory>          Use directory instead of binary directory.
+	--libdir <path>            Copy libraries to path.
+	--plugindir <path>         Copy plugins to path.
+	--debug-symbols            Deploy .debug library files too (see
+	                           -force-debug-info configure flag).
+	--force                    Force updating files.
+	--dry-run                  Simulation mode. Behave normally, but do not
+	                           copy/update any files.
+	--no-plugins               Skip plugin deployment.
+	--no-libraries             Skip library deployment.
+XX	--qmldir <directory>       Scan for QML-imports starting from directory.
+XX	--no-quick-import          Skip deployment of Qt Quick imports.
+	--no-translations          Skip deployment of translations.
+XX	--webkit2                  Deployment of WebKit2 (web process).
+XX	--no-webkit2               Skip deployment of WebKit2.
+	--json                     Print to stdout in JSON format.
+	--verbose <0..2>           Verbose level.
+
+Arguments:
+	[files]                    Path to application's executable(s)
+EOF
+	exit 0
+}
+
+# can only be used on existing paths
+function realpath # <path>
+{ 
+	local p=$1
+	shift 1
+
+	if [[ -d "$p" ]]; then
+		echo "$(cd "$p" && pwd)"
+	else
+		echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+	fi
+}
+
+function parse_args
+{
+	while [[ $# -gt 0 ]]; do
+		arg=$1
+		shift 1
+
+		if [[ "${arg:0:1}" != "-" ]]; then
+			exes+=($arg)
+			continue
+		fi
+
+		case "$arg" in
+			-h|-'?'|--help)
+				usage
+				;;
+
+			-v|--verbose)
+				if [[ $# -lt 1 ]]; then
+					failure "no verbosity given for $arg"
+				fi
+
+				verbose=$1
+				shift 1
+				;;
+
+			--dir)
+				if [[ $# -lt 1 ]]; then
+					failure "no value given for $arg"
+				fi
+
+				dir=$1
+				shift 1
+				;;
+
+			--libdir)
+				if [[ $# -lt 1 ]]; then
+					failure "no value given for $arg"
+				fi
+
+				libdir=$1
+				shift 1
+				;;
+
+			--plugindir)
+				if [[ $# -lt 1 ]]; then
+					failure "no value given for $arg"
+				fi
+
+				plugindir=$1
+				shift 1
+				;;
+
+			--debug-symbols)
+				debug_symbols=1
+				;;
+
+			--force)
+				force=1
+				;;
+
+			--dry-run)
+				dry_run=1
+				;;
+
+			--no-plugins)
+				copy_plugins=0
+				;;
+
+			--no-libraries)
+				copy_libs=0
+				;;
+
+			--no-translations)
+				copy_translations=0
+				;;
+
+			--json)
+				json=1
+				;;
+
+			*)
+				failure "unrecognized argument: $arg"
+				;;
+
+		esac
+
+	done
+}
+
+# makes sure that argument combinations make sense
+function sanitize_args
+{
+	# must have specified at least one exe
+	if [[ ${#exes[@]} -le 0 ]]; then
+		usage
+	fi
+
+	local exe
+	for exe in "${exes[@]}"; do
+		if [[ -x "$exe" && ! -d "$exe" ]]; then
+			:
+		else
+			failure "$exe does not exist or is not an executable"
+		fi
+	done
+
+	# verbose (given by user) should be numeric
+	if ! [[ $verbose =~ ^[0-9]+$ ]] ; then
+		verbose=1
+	fi
+
+	# if --json is specified, it trumps --verbose
+	if [[ $json -ne 0 ]]; then
+		verbose=0
+	fi
+
+	if [[ $verbose -lt 0 ]]; then
+		verbose=0
+	elif [[ $erbose -gt 2 ]]; then
+		verbose=2
+	fi
+
+	# if --dir wasn't given, then use one of the given exes
+	if [[ -z "$dir" ]]; then
+		dir=$(realpath $exes[0])
+	fi
+
+	# if --libdir wasn't given, then use --dir
+	if [[ -z "$libdir" ]]; then
+		libdir=$dir
+	fi
+
+	# if --plugindir wasn't given, then use --dir
+	if [[ -z "$plugindir" ]]; then
+		plugindir=$dir
+	fi
+
+	# doesn't currently have an arg for specifying
+	if [[ -z "$translationdir" ]]; then
+		translationdir=$dir/translations
+	fi
+
+}
+
+
+# record that something needs to be copied
+function setup_copy # <module|plugin> <src> <dest>
+{
+	local type=$1
+	shift 1
+
+	local src=$1
+	shift 1
+
+	local dest=$1
+	shift 1
+
+	# check for dups
+	local x
+	for x in "${srcs[@]}"; do
+		if [[ "$src" == "$x" ]]; then
+			return
+		fi
+	done
+
+	if [[ "$type" == "module" ]]; then
+		copied_modules+=($(basename "$src" | cut -f1 -d'.'))
+	elif [[ "$type" == "plugin" ]]; then
+		:
+	else
+		failure "internal error -- unhandled type $type"
+	fi
+	
+	src_types+=($type)
+	srcs+=($src)
+	dests+=($dest)
+	src_is_debug+=(0)
+
+	# copy a .debug file too if it exists
+	# FIXME: it might be better to base this filename rather on qmake's reported version number
+	dbg=$(ls "$src"*.debug)
+	if [[ $debug_symbols -eq 1 && -f "$dbg" ]]; then
+		src_types+=($type)
+		srcs+=($dbg)
+		dests+=("$(dirname "$dest")/$(basename "$dbg")")
+		src_is_debug+=(1)
+	fi
+}
+
+function is_file_already_setup_for_copy # <filename>
+{
+	local file=$(basename "$1")
+	shift 1
+
+	local x
+	for x in "${srcs[@]}"; do
+		if [[ "$file" == "$(basename "$x")" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+function module_property # <module_name_libname> <option|translation|plugins>
+{
+	local libname=$1
+	shift 1
+
+	local prop=$1
+	shift 1
+
+	# Note: The "option" property is used by windeployqt to implement command line options --<option> to explicitly include
+	#       another module.  Not sure why this is wanted if ldd can give determine the libs we need and nothing else.  But
+	#       in the mean-time, I'm preserving the information from the win src.
+
+	# This information was originally derived from windeployqt/main.cpp qtModulesEntries[] and qtModuleForPlugin()
+	#  (not sure if everything is quite right on the plugins for linux and qml not tested well)
+	# It's done as a case statement so we don't rely on bash-v4's associative arrays (which would be a little more convenient)
+	case "$libname" in
+		libQt5Bluetooth)
+			[[ "$prop" == "option" ]] && echo "bluetooth" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5CLucene)
+			[[ "$prop" == "option" ]] && echo "clucene" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qt_help" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Concurrent)
+			[[ "$prop" == "option" ]] && echo "concurrent" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Core)
+			[[ "$prop" == "option" ]] && echo "core" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Declarative)
+			[[ "$prop" == "option" ]] && echo "declarative" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtquick1" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "qmltooling" && return 0;
+			;;
+
+		libQt5Designer)
+			[[ "$prop" == "option" ]] && echo "designer" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5DesignerComponents)
+			[[ "$prop" == "option" ]] && echo "designercomponents" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Enginio)
+			[[ "$prop" == "option" ]] && echo "enginio" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Gui)
+			[[ "$prop" == "option" ]] && echo "gui" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			# FIXME? for now we pull in all the platform plugins whenever Qt5Gui is an included module.. is that correct?
+			# FIXME? but skip qsvg if Qt5Svg is not a requested module
+			[[ "$prop" == "plugins" ]] && echo "accessible iconengines imageformats platforms platforminputcontexts" && return 0;
+			;;
+
+		libQt5Help)
+			[[ "$prop" == "option" ]] && echo "qthelp" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qt_help" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Multimedia)
+			[[ "$prop" == "option" ]] && echo "multimedia" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "mediaservices audio playlistformats" && return 0;
+			;;
+
+		libQt5MultimediaWidgets)
+			[[ "$prop" == "option" ]] && echo "multimediawidgets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5MultimediaQuick)
+			[[ "$prop" == "option" ]] && echo "multimediaquick" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Network)
+			[[ "$prop" == "option" ]] && echo "network" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "bearer" && return 0;
+			;;
+
+		libQt5Nfc)
+			[[ "$prop" == "option" ]] && echo "nfc" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5OpenGL)
+			[[ "$prop" == "option" ]] && echo "opengl" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Positioning)
+			[[ "$prop" == "option" ]] && echo "positioning" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "position" && return 0;
+			;;
+
+		libQt5PrintSupport)
+			[[ "$prop" == "option" ]] && echo "printsupport" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "printsupport" && return 0;
+			;;
+
+		libQt5Qml)
+			[[ "$prop" == "option" ]] && echo "qml" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtdeclarative" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5QmlTooling)
+			[[ "$prop" == "option" ]] && echo "qmltooling" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "scenegraph" && return 0;
+			;;
+
+		libQt5Quick)
+			[[ "$prop" == "option" ]] && echo "quick" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtdeclarative" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5QuickParticles)
+			[[ "$prop" == "option" ]] && echo "quickparticles" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5QuickWidgets)
+			[[ "$prop" == "option" ]] && echo "quickwidgets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Script)
+			[[ "$prop" == "option" ]] && echo "script" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtscript" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5ScriptTools)
+			[[ "$prop" == "option" ]] && echo "scripttools" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtscript" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Sensors)
+			[[ "$prop" == "option" ]] && echo "sensors" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "sensors sensorgestures" && return 0;
+			;;
+
+		libQt5SerialPort)
+			[[ "$prop" == "option" ]] && echo "serialport" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtserialport" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Sql)
+			[[ "$prop" == "option" ]] && echo "sql" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "sqldrivers" && return 0;
+			;;
+
+		libQt5Svg)
+			[[ "$prop" == "option" ]] && echo "svg" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Test)
+			[[ "$prop" == "option" ]] && echo "test" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5WebKit)
+			[[ "$prop" == "option" ]] && echo "webkit" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5WebKitWidgets)
+			[[ "$prop" == "option" ]] && echo "webkitwidgets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5WebSockets)
+			[[ "$prop" == "option" ]] && echo "websockets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+		
+		libQt5Widgets)
+			[[ "$prop" == "option" ]] && echo "widgets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5WinExtras)
+			[[ "$prop" == "option" ]] && echo "winextras" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Xml)
+			[[ "$prop" == "option" ]] && echo "xml" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5XmlPatterns)
+			[[ "$prop" == "option" ]] && echo "xmlpatterns" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtxmlpatterns" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5WebEngineCore)
+			[[ "$prop" == "option" ]] && echo "webenginecore" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
+			;;
+
+		libQt5WebEngine)
+			[[ "$prop" == "option" ]] && echo "webengine" && return 0;
+			[[ "$prop" == "translation" ]] && echo "qtwebengine" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
+			;;
+
+		libQt5WebEngineWidgets)
+			[[ "$prop" == "option" ]] && echo "webenginewidgets" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
+			;;
+
+		libQt53DCore)
+			[[ "$prop" == "option" ]] && echo "3dcore" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt53DRenderer)
+			[[ "$prop" == "option" ]] && echo "3drenderer" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt53DQuick)
+			[[ "$prop" == "option" ]] && echo "3dquick" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "scenegraph qmltooling" && return 0;
+			;;
+
+		libQt53DQuickRenderer)
+			[[ "$prop" == "option" ]] && echo "3dquickrenderer" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt53DInput)
+			[[ "$prop" == "option" ]] && echo "3dinput" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5Location)
+			[[ "$prop" == "option" ]] && echo "geoservices" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "geoservices" && return 0;
+			;;
+		
+		libQt5WebChannel)
+			[[ "$prop" == "option" ]] && echo "webchannel" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5TextToSpeech)
+			[[ "$prop" == "option" ]] && echo "texttospeech" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "texttospeech" && return 0;
+			;;
+
+		libQt5X11Extras)
+			[[ "$prop" == "option" ]] && echo "x11extras" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5XcbQpa)
+			[[ "$prop" == "option" ]] && echo "xcbqpa" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+
+		libQt5DBus)
+			[[ "$prop" == "option" ]] && echo "dbus" && return 0;
+			[[ "$prop" == "translation" ]] && echo "" && return 0;
+			[[ "$prop" == "plugins" ]] && echo "" && return 0;
+			;;
+	esac
+
+	failure "unhandled module: $libname"
+}
+
+function do_mkdir # <path>
+{
+	local dir=$1
+	shift 1
+
+	if [[ ! -d "$dir" ]]; then
+		mkdir -p "$dir"
+		log 1 "Creating directory $(realpath "$dir")."
+	fi
+}
+
+ 
+function analyze_bin # <application|shared_library> <dest-dir>
+{
+	local bin=$1
+	shift 1
+
+	local destdir=$1
+	shift 1
+
+	log 1 "Analyzing $bin"
+
+	# setup Qt5 lib copies
+	for lib in $(LD_LIBRARY_PATH=$qtlibdir ldd "$bin" | grep -E "$QtModuleRegEx" | sed -e 's/^[	 ]*\([^ ]*\).*$/\1/'); do
+		if [[ ! -f "$qtlibdir/$lib" ]]; then
+			failure "failed to find $qtlibdir/$lib"
+		fi
+
+		if ! is_file_already_setup_for_copy "$lib"; then
+			setup_copy module "$qtlibdir/$lib" "$destdir/$lib"
+
+			# NOTE: we don't analyze_bin on the lib because ldd already was recursive
+
+			# copy in plugins that this library requires
+			# If Needed: explanation of platforms: http://stackoverflow.com/questions/21488072/what-is-the-use-of-various-qt-platform-plugins
+			local module=$(basename "$lib" | cut -f1 -d'.') # stripping directory, file-extension(s)
+			module_property "$module" plugins >/dev/null  # for detecting error
+			local plugin_set
+			for plugin_set in $(module_property $module plugins); do
+				local plugin
+				for plugin in "$qtpluginsdir/$plugin_set/"*.so; do
+					if [[ -f "$plugin" ]]; then
+						plugin_basepath=$(echo "$plugin" | cut -c$((${#qtpluginsdir} + 2 ))-)
+						setup_copy plugin "$plugin" "$plugindir/$plugin_basepath"
+						analyze_bin "$plugin" "$destdir"
+					fi
+				done
+			done
+		fi
+
+	done
+}
+
+function analyze_app # <app>
+{
+	local app=$1
+	shift 1
+
+	# setup lib copies
+	analyze_bin "$app" "$libdir"
+
+	if [[ $copy_translations -eq 1 ]]; then
+		local lang
+		for lang in $(ls $qttranslationsdir/qtbase_*.qm | cut -f2 -d'_' | cut -f1 -d'.'); do
+			log 2 "Processing translation $lang."
+
+			local doit=0
+			local target=$translationdir/qt_$lang.qm
+			declare -a cmd
+	
+			cmd=()
+			cmd+=("$qtbindir/lconvert")
+			cmd+=("-o")
+			cmd+=("$target")
+			local module
+			for module in "${copied_modules[@]}"; do
+
+				module_property "$module" translation >/dev/null  # for detecting error
+				local trans=$(module_property "$module" translation)
+				if [[ ! -z "$trans" ]]; then
+					local trans_file=$qttranslationsdir/${trans}_${lang}.qm
+					if [[ -f "$trans_file" ]]; then
+						cmd+=("$trans_file")
+						doit=1
+					fi
+				fi
+			done
+
+			if [[ $doit -eq 1 ]]; then
+				if [[ $dry_run -eq 0 ]]; then
+					do_mkdir "$(dirname "$target")"
+				fi
+				log 1 "Creating $(basename "$target")..."
+				log 2 "running: ${cmd[@]}"
+				if [[ $dry_run -eq 0 ]]; then
+					"${cmd[@]}"
+				fi
+			fi
+
+		done
+	fi
+}
+
+function patch_corelib # <corelib>
+{
+	local patchCore=$1
+	shift 1
+
+	log 1 "Patching $(basename "$patchCore")..."
+
+	# qconfig.cpp defines this field as 12 + 256 (the var name + 256 bytes for the value)
+	#sed -ie "s/qt_prfxpath=.\{256\}/qt_prfxpath=..." "$patchCore"    doesn't work for null chars
+	cat "$patchCore" | python -c 'import sys; import re; sys.stdout.write(re.sub("qt_prfxpath=................................................................................................................................................................................................................................................................", "qt_prfxpath=.\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", sys.stdin.read()))' >$libdir/binpatch.$$ # new tmp name
+	cat "$libdir/binpatch.$$" >"$patchCore"
+	rm "$libdir/binpatch.$$"
+}
+
+# actually do the copies that we recorded we should do
+function make_it_so
+{
+	# for each src/dest copy it
+	local n=${#srcs[@]}
+	local i
+	for ((i=0;i<n;++i)) {
+		local src=${srcs[$i]}
+		local dest=${dests[$i]}
+		local type=${src_types[$i]}
+
+		src_copied[$i]=0
+
+		if [[ $copy_libs -ne 1 && $type == "module" ]]; then
+			continue;
+		fi
+		if [[ $copy_plugins -ne 1 && $type == "plugins" ]]; then
+			continue;
+		fi
+
+		src_copied[$i]=1
+
+		# if force or the src is newer, then copy it (unless dry-run)
+		if [[ $force -eq 1 || ! -f "$dest" || "$src" -nt "$dest" ]]; then
+
+			[[ $dry_run -eq 0 ]] && do_mkdir "$(dirname "$dest")"
+
+			log 1 "Updating $(basename "$src")."
+			if [[ $dry_run -eq 0 ]]; then
+				cp -p "$src" "$dest"
+
+				if [[ "$(basename "$dest")" =~ $QtCoreLib ]]; then
+					patch_corelib "$dest"
+				fi
+			fi
+
+		else
+			log 1 "$(basename "$dest") is up to date."
+		fi
+	}
+	
+	# we could a wrapper script for the binary  is that a bit like setting up a qt.conf file.  is that our task?.. it would need to be optional
+}
+
+# dump output for --json
+function output_json
+{
+	echo "{"
+	echo "    \"files\": ["
+	local n=${#srcs[@]}
+	local i
+	for ((i=0;i<n;++i)) {
+		local src=${srcs[$i]}
+		local dest=${dests[$i]}
+		local type=${src_types[$i]}
+
+		if [[ ${src_copied[$i]} -eq 0 || ${src_is_debug[$i]} -eq 1 ]]; then
+			# don't report files that weren't copied nor debug files
+			continue;
+		fi
+
+		local abs_src=$(realpath "$src")
+		local abs_dest=$(realpath "$dest")
+
+		echo "        {"
+		echo "            \"source\":  \"$abs_src\","
+		echo "            \"target\":  \"$(dirname "$abs_dest")\""
+		echo -n "        }"
+		if [[ $i -eq $(( $n - 1 )) ]]; then
+			echo
+		else
+			echo ","
+		fi
+	}
+	echo "    ]"
+	echo "}"
+}
+
+
+parse_args "$@"
+sanitize_args
+
+for exe in "${exes[@]}"; do
+	# reset each time round
+	copied_modules=()
+
+	analyze_app "$exe"
+done
+
+make_it_so
+
+if [[ $json -eq 1 ]]; then
+	output_json
+fi
+
+exit 0

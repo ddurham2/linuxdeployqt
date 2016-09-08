@@ -1,0 +1,121 @@
+
+In developing linuxdeployqt, and wanting to support options along the same lines as the windows
+and/or mac version for consistency (v5.6.1-1), I've made these notes:
+
+
+====================================
+Arguments possibly needing support:
+====================================
+
+These from windeployqt
+	--help -h -?
+	-v --version
+	--dir <directory>
+	--libdir           -- where to copy the shared libraries
+	--plugindir        -- where to copy the plugins
+	--debug            -- copy in debug libs (and plugins)
+	--release          -- copy in release libs (and plugins)
+	--pdb              -- copy in the .pdb files too (linux can create .sym files if configure is told to.. change to --syms)
+	--force            -- overwrite existing files
+	--dry-run          -- simulate
+	--no-plugins       -- don't copy the plugins
+	--no-libraries     -- don't copy the shared libs
+	--qmldir           -- "Scan for QML-imports starting from [the specified] directory" (not familiar enough with QML)
+	--no-quick-import  -- Skip deployment of quick imports (ditto)
+	--no-translations  -- Skip deployment of translations
+	--webkit2          -- Deployment of WebKit2 (web process)  (not sure what this is for)
+	--no-webkit2       -- Deployment of WebKit2 (web process)  (not sure what this is for)
+	--json             -- Print to stdou in JSON format (probably useful with --dry-run to know what would get copied)
+	--angle            -- nah
+	--no-angle         -- nah
+	--no-opengl-sw     -- nah
+	--list ...         -- lists various things that would be copied or to where (needed?)
+	--verbose          -- ?
+
+	--<library-name>   -- adds a library by name even tho it's not required by the app.  There are many names.
+
+
+
+======================
+Plugins (--plugindir)
+======================
+windeployqt supports a --plugindir flag.  Initially, I thought this would specify a path, relative 
+to where it would be deploying the .dlls, which Qt would be told where to find plugins.  However,
+after investigation, I've found that --plugindir doesn't do this.
+
+It does put the plugins in the specified location.  But the modification to Qt5Core.dll is just to
+set an internal variable, 'qt_prfxpath' to '.' instead of the installation directory from whence it
+was copied.  For plugins to be loaded from anywhere other than relative to teh Qt5Core.dll file
+itself, it is apparently up to the application writer to either callQCoreApplication::addLibraryPath(),
+or arrange for QT_PLUGINS_PATH to be set, or setup a qt.conf file to point to the plugins path.
+
+
+
+======================
+--debug / --release
+======================
+If it copies in shared objects based on what the given .exe links to, then why are these options
+available?  And if it needs to be available, does it just massage the filenames by adding/removing a
+'d' on them?
+
+I can implement this, but what is the purpose?
+
+
+======================
+--no-translations
+======================
+I need to investigate this.  windeployqt is copying most (but not all of qt_*.qm (minus *help*) into
+the destination.  Not sure why some are excluded.  Perhaps is just unmaintained part of windeployqt?
+
+
+
+======================
+--force
+======================
+Apparently windeployqt doesn't copy the files if they already exist or exist but are older than the src.
+cp -u can be used to have this same behavior, but if we want to be verbose or capture data for json 
+output, then we'll need to use [[ f1 -nt f2 ]] to test for newer-ness.
+
+
+======================
+output
+======================
+for windeployqt:
+
+stderr has just errors/warning
+
+stdout is controlled by --json and --list.
+If nothing is given, then it just explains what it's doing.
+If --list <arg> is given, then it only outputs what is specified
+	source
+		lists
+	target
+	relative
+	mapping
+
+If --json is given then it outputs absolute paths of source files and absolute paths of the target DIRECTORY
+of where the source is being put.
+
+If --list and --json are both specified, --list always trumps --json
+
+
+======================
+--verbose <n>
+======================
+Only has effect if neither --list or --json is given.
+
+Levels are 0 to 3
+  0 - no output
+  1 - the default
+  2 - more info
+  3 - all info
+
+I would presume just to stop at 2 and echo ldd's output at that level
+
+
+======================
+what to copy
+======================
+To know what Qt5 .so files we need to copy, we should run ldd on the given executable and copy those
+in.  But ALSO we must run ldd on any plugins we're copying in because they can require certain Qt5 libs
+too.
