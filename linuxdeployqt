@@ -34,7 +34,7 @@
 # HOW THIS SCRIPT WORKS:
 #
 # After parsing arguments, it iterates over the given application executables.
-# For an executable it runs ldd to determine which qt modules are needed, filtering by libQt5.*
+# For an executable it runs ldd to determine which qt modules are needed, filtering by libQt6.*
 # It arranges for that library file to be copied from the specified Qt installation into the libdir and also pulls in
 # any plugins required by that module (using the $modulesPlugins array).  Not assuming that a plugin might require 
 # additional modules, ldd is used on the plugin's library as well and the process recurs (but it checks for circular
@@ -43,7 +43,7 @@
 # After all the things to copy have been recorded, if it's not a dry run, then we execute those copies and not
 # overwriting existing files unless requested.
 #
-# Additionally, Qt5Core must be massaged to change its qt_prfxpath from the qt installation dir to '.'.
+# Additionally, Qt6Core must be massaged to change its qt_prfxpath from the qt installation dir to '.'.
 #
 # Finally, we output json if requested
 #
@@ -83,7 +83,7 @@ declare -a dests
 declare -a src_is_debug
 declare -a src_copied # after make_it_so is run, this returns a 0 or 1 for each file if it ws really copied
 
-# a collection of the modules being copied (e.g.  "libQt5Core")
+# a collection of the modules being copied (e.g.  "libQt6Core")
 declare -a copied_modules
 
 # what to copy
@@ -368,7 +368,8 @@ function setup_copy # <module|plugin> <src> <dest>
 
 	# copy a .debug file too if it exists
 	# FIXME: it might be better to base this filename rather on qmake's reported version number
-	dbg=$(ls "$src"*.debug)
+	x=$(basename "$src" | sed -e 's/\([^\.]*\).*/\1/') # src of "/path/libblah.[so.6.]debug"  ->  x of "blah.debug"
+	dbg=$(ls "$(dirname "$src")/${x#lib}"*.debug)
 	if [[ $debug_symbols -eq 1 && -f "$dbg" ]]; then
 		src_types+=($type)
 		srcs+=($dbg)
@@ -407,309 +408,309 @@ function module_property # <module_name_libname> <option|translation|plugins>
 	#  (not sure if everything is quite right on the plugins for linux and qml not tested well)
 	# It's done as a case statement so we don't rely on bash-v4's associative arrays (which would be a little more convenient)
 	case "$libname" in
-		libQt5Bluetooth)
+		libQt6Bluetooth)
 			[[ "$prop" == "option" ]] && echo "bluetooth" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5CLucene)
+		libQt6CLucene)
 			[[ "$prop" == "option" ]] && echo "clucene" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qt_help" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Concurrent)
+		libQt6Concurrent)
 			[[ "$prop" == "option" ]] && echo "concurrent" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Core)
+		libQt6Core)
 			[[ "$prop" == "option" ]] && echo "core" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Declarative)
+		libQt6Declarative)
 			[[ "$prop" == "option" ]] && echo "declarative" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtquick1" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "qmltooling" && return 0;
 			;;
 
-		libQt5Designer)
+		libQt6Designer)
 			[[ "$prop" == "option" ]] && echo "designer" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5DesignerComponents)
+		libQt6DesignerComponents)
 			[[ "$prop" == "option" ]] && echo "designercomponents" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Enginio)
+		libQt6Enginio)
 			[[ "$prop" == "option" ]] && echo "enginio" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Gui)
+		libQt6Gui)
 			[[ "$prop" == "option" ]] && echo "gui" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
-			# FIXME? for now we pull in all the platform plugins whenever Qt5Gui is an included module.. is that correct?
-			# FIXME? but skip qsvg if Qt5Svg is not a requested module
+			# FIXME? for now we pull in all the platform plugins whenever Qt6Gui is an included module.. is that correct?
+			# FIXME? but skip qsvg if Qt6Svg is not a requested module
 			[[ "$prop" == "plugins" ]] && echo "accessible iconengines imageformats platforms platforminputcontexts" && return 0;
 			;;
 
-		libQt5Help)
+		libQt6Help)
 			[[ "$prop" == "option" ]] && echo "qthelp" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qt_help" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Multimedia)
+		libQt6Multimedia)
 			[[ "$prop" == "option" ]] && echo "multimedia" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "mediaservices audio playlistformats" && return 0;
 			;;
 
-		libQt5MultimediaWidgets)
+		libQt6MultimediaWidgets)
 			[[ "$prop" == "option" ]] && echo "multimediawidgets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5MultimediaQuick)
+		libQt6MultimediaQuick)
 			[[ "$prop" == "option" ]] && echo "multimediaquick" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtmultimedia" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Network)
+		libQt6Network)
 			[[ "$prop" == "option" ]] && echo "network" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "bearer" && return 0;
 			;;
 
-		libQt5Nfc)
+		libQt6Nfc)
 			[[ "$prop" == "option" ]] && echo "nfc" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5OpenGL)
+		libQt6OpenGL)
 			[[ "$prop" == "option" ]] && echo "opengl" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Positioning)
+		libQt6Positioning)
 			[[ "$prop" == "option" ]] && echo "positioning" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "position" && return 0;
 			;;
 
-		libQt5PrintSupport)
+		libQt6PrintSupport)
 			[[ "$prop" == "option" ]] && echo "printsupport" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "printsupport" && return 0;
 			;;
 
-		libQt5Qml)
+		libQt6Qml)
 			[[ "$prop" == "option" ]] && echo "qml" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtdeclarative" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5QmlTooling)
+		libQt6QmlTooling)
 			[[ "$prop" == "option" ]] && echo "qmltooling" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "scenegraph" && return 0;
 			;;
 
-		libQt5Quick)
+		libQt6Quick)
 			[[ "$prop" == "option" ]] && echo "quick" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtdeclarative" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5QuickParticles)
+		libQt6QuickParticles)
 			[[ "$prop" == "option" ]] && echo "quickparticles" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5QuickWidgets)
+		libQt6QuickWidgets)
 			[[ "$prop" == "option" ]] && echo "quickwidgets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Script)
+		libQt6Script)
 			[[ "$prop" == "option" ]] && echo "script" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtscript" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5ScriptTools)
+		libQt6ScriptTools)
 			[[ "$prop" == "option" ]] && echo "scripttools" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtscript" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Sensors)
+		libQt6Sensors)
 			[[ "$prop" == "option" ]] && echo "sensors" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "sensors sensorgestures" && return 0;
 			;;
 
-		libQt5SerialPort)
+		libQt6SerialPort)
 			[[ "$prop" == "option" ]] && echo "serialport" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtserialport" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Sql)
+		libQt6Sql)
 			[[ "$prop" == "option" ]] && echo "sql" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "sqldrivers" && return 0;
 			;;
 
-		libQt5Svg)
+		libQt6Svg)
 			[[ "$prop" == "option" ]] && echo "svg" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Test)
+		libQt6Test)
 			[[ "$prop" == "option" ]] && echo "test" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5WebKit)
+		libQt6WebKit)
 			[[ "$prop" == "option" ]] && echo "webkit" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5WebKitWidgets)
+		libQt6WebKitWidgets)
 			[[ "$prop" == "option" ]] && echo "webkitwidgets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5WebSockets)
+		libQt6WebSockets)
 			[[ "$prop" == "option" ]] && echo "websockets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 		
-		libQt5Widgets)
+		libQt6Widgets)
 			[[ "$prop" == "option" ]] && echo "widgets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5WinExtras)
+		libQt6WinExtras)
 			[[ "$prop" == "option" ]] && echo "winextras" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Xml)
+		libQt6Xml)
 			[[ "$prop" == "option" ]] && echo "xml" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtbase" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5XmlPatterns)
+		libQt6XmlPatterns)
 			[[ "$prop" == "option" ]] && echo "xmlpatterns" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtxmlpatterns" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5WebEngineCore)
+		libQt6WebEngineCore)
 			[[ "$prop" == "option" ]] && echo "webenginecore" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
 			;;
 
-		libQt5WebEngine)
+		libQt6WebEngine)
 			[[ "$prop" == "option" ]] && echo "webengine" && return 0;
 			[[ "$prop" == "translation" ]] && echo "qtwebengine" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
 			;;
 
-		libQt5WebEngineWidgets)
+		libQt6WebEngineWidgets)
 			[[ "$prop" == "option" ]] && echo "webenginewidgets" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "qtwebengine" && return 0;
 			;;
 
-		libQt53DCore)
+		libQt63DCore)
 			[[ "$prop" == "option" ]] && echo "3dcore" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt53DRenderer)
+		libQt63DRenderer)
 			[[ "$prop" == "option" ]] && echo "3drenderer" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt53DQuick)
+		libQt63DQuick)
 			[[ "$prop" == "option" ]] && echo "3dquick" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "scenegraph qmltooling" && return 0;
 			;;
 
-		libQt53DQuickRenderer)
+		libQt63DQuickRenderer)
 			[[ "$prop" == "option" ]] && echo "3dquickrenderer" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt53DInput)
+		libQt63DInput)
 			[[ "$prop" == "option" ]] && echo "3dinput" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5Location)
+		libQt6Location)
 			[[ "$prop" == "option" ]] && echo "geoservices" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "geoservices" && return 0;
 			;;
 		
-		libQt5WebChannel)
+		libQt6WebChannel)
 			[[ "$prop" == "option" ]] && echo "webchannel" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5TextToSpeech)
+		libQt6TextToSpeech)
 			[[ "$prop" == "option" ]] && echo "texttospeech" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "texttospeech" && return 0;
 			;;
 
-		libQt5X11Extras)
+		libQt6X11Extras)
 			[[ "$prop" == "option" ]] && echo "x11extras" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5XcbQpa)
+		libQt6XcbQpa)
 			[[ "$prop" == "option" ]] && echo "xcbqpa" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
 			;;
 
-		libQt5DBus)
+		libQt6DBus)
 			[[ "$prop" == "option" ]] && echo "dbus" && return 0;
 			[[ "$prop" == "translation" ]] && echo "" && return 0;
 			[[ "$prop" == "plugins" ]] && echo "" && return 0;
@@ -741,7 +742,7 @@ function analyze_bin # <application|shared_library> <dest-dir>
 
 	log 1 "Analyzing $bin"
 
-	# setup Qt5 lib copies
+	# setup Qt6 lib copies
 	for lib in $(LD_LIBRARY_PATH=$qtlibdir ldd "$bin" | grep -E "$QtModuleRegEx" | sed -e 's/^[	 ]*\([^ ]*\).*$/\1/'); do
 		if [[ ! -f "$qtlibdir/$lib" ]]; then
 			failure "failed to find $qtlibdir/$lib"
