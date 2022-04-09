@@ -743,7 +743,7 @@ function analyze_bin # <application|shared_library> <dest-dir>
 	log 1 "Analyzing $bin"
 
 	# setup Qt6 lib copies
-	for lib in $(LD_LIBRARY_PATH=$qtlibdir ldd "$bin" | grep -E "$QtModuleRegEx" | sed -e 's/^[	 ]*\([^ ]*\).*$/\1/'); do
+	for lib in $(LD_LIBRARY_PATH=$qtlibdir:$LD_LIBRARY_PATH ldd "$bin" | grep -E "$QtModuleRegEx" | sed -e 's/^[	 ]*\([^ ]*\).*$/\1/'); do
 		if [[ ! -f "$qtlibdir/$lib" ]]; then
 			failure "failed to find $qtlibdir/$lib"
 		fi
